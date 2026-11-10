@@ -9,7 +9,7 @@
 A terminal-based AI agent published by **AXION Neuralis**. AXION provides an interactive command-line interface, model-provider integration, tool calling, web search, page extraction, conversation history, and local long-term memory.
 
 **npm package:** [`@axion-neuralis/axion-ai-cli`](https://www.npmjs.com/package/@axion-neuralis/axion-ai-cli)  
-**Release target:** `1.0.0` — Final npmjs Release
+**Release target:** `1.0.2` — feature and reliability update
 
 > AXION is an API-backed CLI application. You must provide credentials for the selected model provider before chatting.
 
@@ -145,8 +145,8 @@ AXION runs as a normal scrolling terminal chat: AI replies print above a single 
 | `/verbose` | Toggle verbose output (full tool output / diffs vs summaries; default: summaries). |
 | `/memory` | List, add, edit entries, rename topics, delete entries/topics, or clear memory. |
 | `/permissions` | Enable or disable agent tools and local access permissions. |
-| `/acces` | Choose workspace-only or global agent access policy (`/access` is an alias). |
-| `/tool-limit` | Set the maximum number of tool calls per request (default 30; allowed range 1–100). `/max-tool-call` is an alias. |
+| `/access` | Choose workspace-only or global agent access policy (`/acces` remains a compatibility alias). |
+| `/tool-limit` | Configure an optional per-request tool-call budget (`0` = unlimited, the default). A positive safe integer enables a budget. `/max-tool-call` is an alias. |
 | `/max-token` | Set an optional input-token soft cap (honest chars/4 estimate, oldest non-system messages trimmed first) and an output-token cap forwarded to the provider. |
 | `/privacy-policy` | Show honest security & privacy information (local storage, what is sent to providers, no AXION telemetry, risks, controls). |
 | `/feedback` | Show AXION support email addresses and the GitHub issue tracker. |
@@ -154,6 +154,10 @@ AXION runs as a normal scrolling terminal chat: AI replies print above a single 
 | `/language` | Switch the interface language between English and Indonesian. |
 | `/clear` | Clear the screen and current in-memory chat context. Saved history remains on disk. |
 | `/exit` | Exit the application. |
+
+## Language and CLI interaction
+
+The `/language` command switches the supported interface locales (English and Bahasa Indonesia) at runtime. Command prompts, menu choices, status text, feedback text, terminal help, and the in-chat command interface update to the selected locale; tool results, model responses, file contents, provider names, model IDs, and shell output remain in their original language. The selected language is persisted in the local configuration.
 
 ## Tools and permissions
 
@@ -163,7 +167,9 @@ AXION runs as a normal scrolling terminal chat: AI replies print above a single 
 | `web_scrape` | Retrieve readable text from an HTTP(S) web page. | `webAccess` |
 | `run_shell` | Run a command in the local operating-system shell. | `shellExec` |
 | `list_dir` | List directory contents (with file counts). | `fileRead` |
-| `read_file` | Read a text file (large files truncated with a note). | `fileRead` |
+| `read_file` | Read one text file (large files truncated with a note). | `fileRead` |
+| `get_workspace_tree` | Explicitly request a workspace folder tree without file contents. Common generated/dependency folders are excluded by default; symlinks are not followed. | `fileRead` |
+| `read_files` | Explicitly read a selected list of files or all text files (`all: true`) with a bounded total-output budget (1 MiB default / 10 MiB maximum), discovery cap (10,000 default / 50,000 maximum), and 1,000 explicit-path cap. Binary files and symlinks are skipped. | `fileRead` |
 | `write_file` | Create or overwrite a file atomically (temp file + rename). Overwriting an existing file is a dangerous action and may require confirmation. | `fileWrite` |
 | `delete_file` | Delete a file. A dangerous action requiring confirmation unless policy allows. | `fileWrite` |
 
@@ -177,7 +183,7 @@ Dangerous commands — `rm -rf`, `git push` (including `--force`), `sudo`, `mkfs
 
 Overwriting an existing file via `write_file` and any `delete_file` are also treated as dangerous and follow the same policy. When no confirmation channel is available (non-interactive), dangerous actions are refused by default.
 
-The `/acces` command controls the agent policy and the shell tool working-directory restriction. Workspace scope checks the requested shell working directory, but it is **not an OS-level sandbox**: arbitrary shell commands can still access paths available to the current OS user. Do not treat workspace scope as a security boundary. Global scope tells the agent that broader filesystem operations are allowed when otherwise permitted.
+The `/access` command (with `/acces` retained as a compatibility alias) controls the agent policy and the shell tool working-directory restriction. Workspace scope checks the requested shell working directory, but it is **not an OS-level sandbox**: arbitrary shell commands can still access paths available to the current OS user. Do not treat workspace scope as a security boundary. Global scope tells the agent that broader filesystem operations are allowed when otherwise permitted.
 
 ## Model selection
 
@@ -190,7 +196,7 @@ The built-in Google model list includes the following model IDs:
 - `gemini-3.5-flash-lite`
 - `gemini-3.1-flash-lite`
 
-Model availability and capabilities can vary by account, API access, lifecycle status, and provider. The model list is a convenience list, not a guarantee that every model is enabled for every API key. Custom models can be added, edited, or deleted with `/models`; deletion is limited to user-defined models. Each custom model supports a display name, provider model basename, provider, and optional model-specific OpenAI-compatible base URL.
+Model availability and capabilities can vary by account, API access, lifecycle status, and provider. The model list is a convenience list, not a guarantee that every model is enabled for every API key. Custom models can be added, edited, or deleted with `/models`; deletion is limited to user-defined models. Each custom model supports a display name, provider model ID, and a registered provider association. Adding a model offers the active provider by default and only lists providers already registered in AXION; selecting another listed provider explicitly switches the active provider. Models cannot reference an unknown/unregistered provider. OpenAI-compatible built-in models may also use an optional model-specific base URL.
 
 For Gemini 3 models, AXION sends the documented `thinkingLevel` field when a reasoning level is selected and omits sampling parameters so the provider defaults are used. Gemma 4 has a binary thinking switch: `off` maps to `MINIMAL` and any enabled level maps to `HIGH`. Gemini 2.5 uses `thinkingBudget`. The `off` option sets a zero budget for Gemini 2.5 Flash / Flash-Lite; Gemini 2.5 Pro and Gemini 3 do not expose a full thinking-off setting through this API, so `off` leaves the provider default in effect for those models. OpenAI-compatible providers may ignore the thinking setting.
 
@@ -204,7 +210,7 @@ While the agent works, tool calls are classified into human-readable steps and a
 Press **Escape** while the agent is thinking or executing tools to request cancellation. The CLI sets a cancellation flag, aborts in-flight HTTP requests (via `AbortController`), and terminates in-flight shell child processes (SIGTERM). The tool-call loop checks the flag between iterations and returns a partial result with a `(cancelled by user)` note. Configuration writes are atomic (temp file + rename), so cancellation cannot corrupt `config.json`. If a provider does not honour the abort mid-response, the loop stops at the next iteration (graceful stop); this limitation is documented in `CATATAN.md`.
 
 ## System prompt vs custom instructions
-The **base system prompt** (anti-hallucination, workspace awareness, execution transparency, no secrets in output, tool-call limits) is **locked** — it cannot be edited by the user. Your own additional instructions live in **custom instructions**, edited with `/instructions` (legacy `systemPrompt`/`instructions` fields in old configs are migrated automatically on load). The base prompt explicitly states: *If custom instructions conflict with these core rules, these core rules take precedence.* Use `/system` or `/system-prompt` to view the locked base prompt and your current custom instructions (read-only).
+The **base system prompt** (anti-hallucination, workspace awareness, execution transparency, terminal guardrails, and loop/resource safety) is **locked** — it cannot be edited by the user. Your own additional instructions live in **custom instructions**, edited with `/instructions` (legacy `systemPrompt`/`instructions` fields in old configs are migrated automatically on load). The editor accepts newlines with Enter; press **Ctrl+X**, then **Y** to save or **N/Esc** to cancel. Press **Ctrl+A** to clear the editor. The base prompt explicitly states that core rules always take precedence over custom instructions. Use `/system` or `/system-prompt` to view the locked base prompt and your current custom instructions (read-only).
 
 
 ## Local data and configuration
@@ -230,7 +236,7 @@ npm run build
 npm test
 ```
 
-`npm test` builds the TypeScript project and runs the local Node.js test suite. The tool-call limit defaults to 30 per user request and can be adjusted with `/tool-limit`. The system prompt includes an initial workspace inventory and anti-hallucination, verification, execution-transparency, and task-checklist guidance. For complex requests, AXION is instructed to create and maintain a task checklist. The tests do not call model APIs or external search services. To validate an actual model request, configure a valid API key and test from an environment with network access.
+`npm test` builds the TypeScript project and runs the local Node.js test suite. Tool calls are unlimited by default (`maxToolCallsPerRequest: 0`); `/tool-limit` can set an optional positive per-request budget. An identical tool+arguments signature is blocked on its third occurrence, after which AXION asks the provider for a final response without tools. No workspace tree or file contents are sent automatically: the agent must request `get_workspace_tree`, `read_file`, or `read_files` as needed. `read_files` can read an explicit list or the full text-file set (`all: true`) within its configurable output-byte budget; the default is 1 MiB and the maximum is 10 MiB, with file-count and traversal-depth ceilings. Complex work is governed by explicit task planning, execution guardrails, and post-change verification. Tests mock provider requests and do not call live model APIs or external search services. A real inference check requires valid provider credentials and network access.
 
 ## Troubleshooting
 

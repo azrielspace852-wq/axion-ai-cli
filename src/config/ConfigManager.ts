@@ -33,7 +33,7 @@ export const DEFAULT_CONFIG: AxionConfig = {
   dangerousActionPolicy: 'always-ask',
   verbose: false,
   accessScope: 'workspace',
-  maxToolCallsPerRequest: 30,
+  maxToolCallsPerRequest: 0,
   maxInputTokens: undefined,
   maxOutputTokens: undefined,
   hasCompletedOnboarding: false,
@@ -61,9 +61,17 @@ function parseCustomModels(value: unknown): CustomModel[] {
     id: item.id.trim(),
     label: item.label.trim() || item.id.trim(),
     provider: item.provider,
+    ...(typeof item.providerId === 'string' && item.providerId.trim() ? { providerId: item.providerId.trim() } : {}),
     ...(typeof item.baseUrl === 'string' && item.baseUrl.trim() ? { baseUrl: item.baseUrl.trim() } : {}),
   }));
 }
+function isValidProviderEndpoint(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch { return false; }
+}
+
 function parseCustomProviders(value: unknown): CustomProvider[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
@@ -73,7 +81,7 @@ function parseCustomProviders(value: unknown): CustomProvider[] {
     const id = typeof item.id === 'string' ? item.id.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-') : '';
     if (!id || seen.has(id)) continue; // uniqueness enforced; duplicates dropped
     seen.add(id);
-    if (typeof item.baseUrl !== 'string' || !item.baseUrl.trim()) continue;
+    if (typeof item.baseUrl !== 'string' || !isValidProviderEndpoint(item.baseUrl.trim())) continue;
     out.push({
       id,
       name: (typeof item.name === 'string' && item.name.trim()) ? item.name.trim() : id,
@@ -123,7 +131,12 @@ function normalizeConfig(value: unknown, existingConfig: boolean): AxionConfig {
       apiKey: stringValue(openai.apiKey, ''),
     },
     model: stringValue(parsed.model, DEFAULT_MODEL_ID).trim() || DEFAULT_MODEL_ID,
-    customModels: parseCustomModels(parsed.customModels),
+    customModels: parseCustomModels(parsed.customModels).filter((model) => {
+      if (!model.providerId) return true;
+      if (model.providerId === 'google-ai-studio') return model.provider === 'google-ai-studio';
+      if (model.providerId === 'openai-compatible') return model.provider === 'openai-compatible';
+      return model.provider === 'openai-compatible' && customProviderIds.has(model.providerId);
+    }),
     customProviders,
     thinkingLevel: levels.includes(requestedLevel as ThinkingLevel)
       ? requestedLevel as ThinkingLevel
@@ -135,8 +148,9 @@ function normalizeConfig(value: unknown, existingConfig: boolean): AxionConfig {
       ? (requestedPolicy as DangerousActionPolicy)
       : DEFAULT_CONFIG.dangerousActionPolicy,
     verbose: typeof parsed.verbose === 'boolean' ? parsed.verbose : DEFAULT_CONFIG.verbose,
-    maxToolCallsPerRequest: Number.isInteger(parsed.maxToolCallsPerRequest)
-      ? Math.min(100, Math.max(1, Number(parsed.maxToolCallsPerRequest)))
+    // 0 means unlimited. Positive safe integers configure an explicit per-request budget.
+    maxToolCallsPerRequest: Number.isSafeInteger(parsed.maxToolCallsPerRequest) && Number(parsed.maxToolCallsPerRequest) >= 0
+      ? Number(parsed.maxToolCallsPerRequest)
       : DEFAULT_CONFIG.maxToolCallsPerRequest,
     maxInputTokens: normalizeTokenLimit(parsed.maxInputTokens),
     maxOutputTokens: normalizeTokenLimit(parsed.maxOutputTokens),

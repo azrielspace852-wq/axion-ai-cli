@@ -27,6 +27,39 @@ function validHttpUrl(value: string): boolean {
   }
 }
 
+interface RegisteredModelProvider {
+  id: string;
+  name: string;
+  transport: ProviderType;
+  custom: boolean;
+}
+
+function registeredModelProviders(ctx: CommandContext): RegisteredModelProvider[] {
+  return [
+    { id: 'google-ai-studio', name: 'Google AI Studio', transport: 'google-ai-studio', custom: false },
+    { id: 'openai-compatible', name: 'OpenAI-compatible (built-in)', transport: 'openai-compatible', custom: false },
+    ...(ctx.config.customProviders || []).map((provider) => ({
+      id: provider.id,
+      name: `${provider.name} (${provider.id})`,
+      transport: 'openai-compatible' as ProviderType,
+      custom: true,
+    })),
+  ];
+}
+
+function validModelId(value: string): boolean {
+  return value.length > 0 && value.length <= 200 && !/[\s\u0000-\u001f]/.test(value);
+}
+
+function hasUsableProviderCredentials(ctx: CommandContext, provider: RegisteredModelProvider): boolean {
+  if (provider.id === 'google-ai-studio') return Boolean(ctx.config.google.apiKey.trim());
+  if (provider.id === 'openai-compatible') {
+    return validHttpUrl(ctx.config.openaiCompatible.baseUrl) && Boolean(ctx.config.openaiCompatible.apiKey.trim());
+  }
+  const registered = (ctx.config.customProviders || []).find((item) => item.id === provider.id);
+  return Boolean(registered && validHttpUrl(registered.baseUrl) && registered.apiKey.trim());
+}
+
 export async function handleModels(ctx: CommandContext): Promise<HandlerResult | void> {
   const actions = await choose(ctx, 'Custom model management', [
     'Select a model', 'Add custom model', 'Edit custom model', 'Delete custom model', 'Cancel',
@@ -37,7 +70,7 @@ export async function handleModels(ctx: CommandContext): Promise<HandlerResult |
   if (actions === 3) return deleteCustomModel(ctx);
 
   const active = ctx.config.activeProvider;
-  const all: CustomModel[] = [...DEFAULT_MODELS, ...ctx.config.customModels].filter((model) => model.provider === active);
+  const all: CustomModel[] = [...DEFAULT_MODELS, ...ctx.config.customModels].filter((model) => (model.providerId || model.provider) === active);
   if (!all.length) return ctx.repl.print(`No models available for provider "${active}". Add one with "Add custom model" or switch provider with /provider.`);
   const activeModelIdx = all.findIndex((model) => model.id === ctx.config.model);
   const selected = await choose(ctx, `Select model (provider: ${active})`, [
@@ -47,7 +80,7 @@ export async function handleModels(ctx: CommandContext): Promise<HandlerResult |
   if (selected === null || selected >= all.length) return;
   const model = all[selected];
   ctx.config.model = model.id;
-  ctx.config.activeProvider = model.provider;
+  ctx.config.activeProvider = model.providerId || model.provider;
   ctx.saveConfig();
   ctx.repl.print(`Model set to ${model.label}.`);
 }
@@ -55,23 +88,47 @@ export async function handleModels(ctx: CommandContext): Promise<HandlerResult |
 async function addCustomModel(ctx: CommandContext): Promise<void> {
   const id = (await ctx.repl.question('Model basename / provider model ID: ')).trim();
   if (!id) return ctx.repl.print('Cancelled.');
+  if (!validModelId(id)) return ctx.repl.print('Invalid model ID. Use 1–200 characters without whitespace or control characters.');
   if (ctx.config.customModels.some((model) => model.id === id) || DEFAULT_MODELS.some((model) => model.id === id)) {
     return ctx.repl.print('A model with that basename already exists.');
   }
-  const label = (await ctx.repl.question('Model name: ')).trim() || id;
-  const providerIndex = await choose(ctx, 'Provider', ['Google AI Studio', 'OpenAI-compatible', 'Cancel']);
-  if (providerIndex === null || providerIndex === 2) return;
-  const provider: ProviderType = providerIndex === 1 ? 'openai-compatible' : 'google-ai-studio';
-  let baseUrl = '';
-  if (provider === 'openai-compatible') {
-    baseUrl = (await ctx.repl.question('Optional model-specific base URL (blank uses provider default): ')).trim();
-    if (baseUrl && !validHttpUrl(baseUrl)) return ctx.repl.print('Invalid base URL; expected absolute HTTP/HTTPS URL without credentials.');
+  const label = (await ctx.repl.question('Model display name (maximum 100 characters): ')).trim() || id;
+  if (label.length > 100 || /[\u0000-\u001f]/.test(label)) return ctx.repl.print('Invalid model display name. Use at most 100 characters without control characters.');
+
+  const providers = registeredModelProviders(ctx);
+  const activeProvider = providers.find((provider) => provider.id === ctx.config.activeProvider);
+  if (!activeProvider) return ctx.repl.print('The active provider is not registered. Select a registered provider with /provider first.');
+  const otherProviders = providers.filter((provider) => provider.id !== activeProvider.id);
+  const options = [
+    `Use active provider (${activeProvider.name})`,
+    ...otherProviders.map((provider) => `Use another registered provider (${provider.name})`),
+    'Cancel',
+  ];
+  const providerIndex = await choose(ctx, `Use provider active (${activeProvider.name}) or another registered provider?`, options, 0);
+  if (providerIndex === null || providerIndex === options.length - 1) return;
+  const selectedProvider = providerIndex === 0 ? activeProvider : otherProviders[providerIndex - 1];
+  if (!selectedProvider) return ctx.repl.print('Invalid provider selection. No changes were saved.');
+  if (!hasUsableProviderCredentials(ctx, selectedProvider)) {
+    return ctx.repl.print(`Provider ${selectedProvider.name} is not configured with a valid endpoint and API key. Configure it with /provider or /api-key before adding a model.`);
   }
-  ctx.config.customModels.push({ id, label, provider, ...(baseUrl ? { baseUrl: baseUrl.replace(/\/$/, '') } : {}) });
+
+  let baseUrl = '';
+  if (selectedProvider.id === 'openai-compatible') {
+    baseUrl = (await ctx.repl.question('Optional model-specific base URL (blank uses registered provider settings): ')).trim();
+    if (baseUrl && !validHttpUrl(baseUrl)) return ctx.repl.print('Invalid base URL; expected an absolute HTTP/HTTPS URL without embedded credentials.');
+  }
+  const customModel: CustomModel = {
+    id,
+    label,
+    provider: selectedProvider.transport,
+    ...(selectedProvider.custom ? { providerId: selectedProvider.id } : {}),
+    ...(baseUrl ? { baseUrl: baseUrl.replace(/\/$/, '') } : {}),
+  };
+  ctx.config.customModels.push(customModel);
+  ctx.config.activeProvider = selectedProvider.id;
   ctx.config.model = id;
-  ctx.config.activeProvider = provider;
   ctx.saveConfig();
-  ctx.repl.print(`Added and selected custom model "${label}".`);
+  ctx.repl.print(`Added and selected custom model "${label}" for registered provider "${selectedProvider.name}".`);
 }
 
 async function editCustomModel(ctx: CommandContext): Promise<void> {
@@ -81,38 +138,49 @@ async function editCustomModel(ctx: CommandContext): Promise<void> {
   if (index === null || index >= models.length) return;
   const model = models[index];
   const name = (await promptValue(ctx, 'Model name', model.label)).trim();
+  if (name && (name.length > 100 || /[\u0000-\u001f]/.test(name))) {
+    return ctx.repl.print('Invalid model display name. Use at most 100 characters without control characters.');
+  }
   const basename = (await promptValue(ctx, 'Model basename / provider model ID', model.id)).trim();
+  if (basename && !validModelId(basename)) return ctx.repl.print('Invalid model ID. No changes were saved.');
   if (basename && basename !== model.id && (models.some((item, i) => i !== index && item.id === basename) || DEFAULT_MODELS.some((item) => item.id === basename))) {
     return ctx.repl.print('That model basename is already in use. No changes were saved.');
   }
-  const providerOptions = ['Google AI Studio', 'OpenAI-compatible'];
-  const providerIndex = await choose(ctx, `Provider (current: ${model.provider})`, providerOptions, model.provider === 'openai-compatible' ? 1 : 0);
-  if (providerIndex === null) return;
-  const nextProvider = providerIndex === 1 ? 'openai-compatible' : 'google-ai-studio';
+  const providers = registeredModelProviders(ctx);
+  const currentProviderId = model.providerId || model.provider;
+  const currentProviderIndex = providers.findIndex((provider) => provider.id === currentProviderId);
+  const providerIndex = await choose(ctx, `Provider (current: ${providers[currentProviderIndex]?.name || currentProviderId})`, [
+    ...providers.map((provider) => provider.name), 'Cancel',
+  ], currentProviderIndex >= 0 ? currentProviderIndex : undefined);
+  if (providerIndex === null || providerIndex >= providers.length) return;
+  const nextProvider = providers[providerIndex];
+  if (!nextProvider) return;
+  if (!hasUsableProviderCredentials(ctx, nextProvider)) {
+    return ctx.repl.print(`Provider ${nextProvider.name} is not configured with a valid endpoint and API key. No changes were saved.`);
+  }
   let baseUrl = model.baseUrl || '';
-  if (nextProvider === 'openai-compatible') {
+  if (nextProvider.id === 'openai-compatible') {
     const nextUrl = (await promptValue(ctx, 'Model-specific base URL (blank clears override)', baseUrl || 'provider default')).trim();
     if (nextUrl) {
       if (!validHttpUrl(nextUrl)) return ctx.repl.print('Invalid base URL. No changes were saved.');
       baseUrl = nextUrl.replace(/\/$/, '');
-    } else {
-      baseUrl = '';
-    }
-  } else {
-    baseUrl = '';
-  }
+    } else baseUrl = '';
+  } else baseUrl = '';
+
   const oldId = model.id;
   model.label = name || model.label;
   model.id = basename || model.id;
-  model.provider = nextProvider;
-  if (baseUrl) model.baseUrl = baseUrl;
+  model.provider = nextProvider.transport;
+  if (nextProvider.custom) model.providerId = nextProvider.id;
+  else delete model.providerId;
+  if (baseUrl && nextProvider.id === 'openai-compatible') model.baseUrl = baseUrl;
   else delete model.baseUrl;
   if (ctx.config.model === oldId) {
     ctx.config.model = model.id;
-    ctx.config.activeProvider = model.provider;
+    ctx.config.activeProvider = nextProvider.id;
   }
   ctx.saveConfig();
-  ctx.repl.print(`Updated custom model "${model.label}".`);
+  ctx.repl.print(`Updated custom model "${model.label}" for provider "${nextProvider.name}".`);
 }
 
 async function deleteCustomModel(ctx: CommandContext): Promise<void> {
@@ -156,12 +224,12 @@ export async function handleViewSystemPrompt(ctx: CommandContext): Promise<Handl
 export async function handleInstructions(ctx: CommandContext): Promise<HandlerResult | void> {
   ctx.repl.print(chalk.bold('Current custom instructions:'));
   ctx.repl.print(ctx.config.customInstructions || chalk.dim('(none)'));
-  ctx.repl.print(chalk.dim('These are appended to the locked base system prompt. If they conflict with core rules, core rules win.'));
-  const answer = (await ctx.repl.question('New custom instructions ("clear" to remove, Enter to keep): ')).trim();
-  if (!answer) return;
-  ctx.config.customInstructions = answer.toLowerCase() === 'clear' ? '' : answer;
+  ctx.repl.print(chalk.dim('Enter inserts a newline. CTRL+X opens save confirmation; Y saves, N or ESC cancels. CTRL+A clears the editor.'));
+  const answer = await ctx.repl.editMultiline('Edit custom instructions (the existing text is prefilled):', ctx.config.customInstructions || '');
+  if (answer === null) return ctx.repl.print('Custom instructions edit cancelled; no changes were saved.');
+  ctx.config.customInstructions = answer.trim().toLowerCase() === 'clear' ? '' : answer;
   ctx.saveConfig();
-  ctx.repl.print('Custom instructions updated.');
+  ctx.repl.print('Custom instructions saved.');
 }
 
 export async function handleVerbose(ctx: CommandContext): Promise<HandlerResult | void> {
@@ -289,17 +357,17 @@ export async function handleAccess(ctx: CommandContext): Promise<HandlerResult |
 
 export async function handleToolLimit(ctx: CommandContext): Promise<HandlerResult | void> {
   const current = ctx.config.maxToolCallsPerRequest;
-  const options = ['5', '10', '20', '30 (default)', '50', '100', 'Enter custom value', 'Cancel'];
-  const presetValues = [5, 10, 20, 30, 50, 100];
+  const options = ['Unlimited (default)', '5', '10', '20', '30', '50', '100', 'Enter custom value', 'Cancel'];
+  const presetValues = [0, 5, 10, 20, 30, 50, 100];
   const activeIdx = presetValues.indexOf(current);
-  const selected = await choose(ctx, `Maximum tool calls per request (current: ${current})`, options, activeIdx >= 0 ? activeIdx : undefined);
-  if (selected === null || selected === 7) return;
+  const selected = await choose(ctx, `Tool calls per request (current: ${current === 0 ? 'Unlimited' : current})`, options, activeIdx >= 0 ? activeIdx : undefined);
+  if (selected === null || selected === 8) return;
   let value = presetValues[selected];
-  if (selected === 6) value = Number((await ctx.repl.question('Enter a limit from 1 to 100: ')).trim());
-  if (!Number.isInteger(value) || value < 1 || value > 100) return ctx.repl.print('Invalid limit. Choose an integer from 1 to 100.');
+  if (selected === 7) value = Number((await ctx.repl.question('Enter 0 for unlimited or a positive safe integer: ')).trim());
+  if (!Number.isSafeInteger(value) || value < 0) return ctx.repl.print('Invalid value. Enter 0 (unlimited) or a positive safe integer.');
   ctx.config.maxToolCallsPerRequest = value;
   ctx.saveConfig();
-  ctx.repl.print(`Tool call limit set to ${value} per request.`);
+  ctx.repl.print(value === 0 ? 'Tool calls are unlimited per request; repeated identical tool calls remain protected by the loop guard.' : `Tool-call budget set to ${value} per request.`);
 }
 
 export async function handleProvider(ctx: CommandContext): Promise<HandlerResult | void> {
@@ -493,7 +561,7 @@ export async function handleFeedback(ctx: CommandContext): Promise<HandlerResult
 export async function handleHelp(ctx: CommandContext): Promise<HandlerResult | void> {
   const cmds: Array<[string, string]> = [
     ['/feedback', 'Show support email addresses and GitHub issue tracker'],
-    ['/acces', 'Choose workspace-only or global access scope'],
+    ['/access', 'Choose workspace-only or global access scope'],
     ['/models', 'Select, add, edit, or delete custom models'],
     ['/thinking', t('help.thinking')],
     ['/system', 'View the locked base system prompt (read-only)'],
@@ -535,7 +603,7 @@ export async function handlePrivacyPolicy(ctx: CommandContext): Promise<HandlerR
     '   • When you chat, the following are sent to the active LLM provider',
     '     (Google AI Studio or your configured OpenAI-compatible endpoint):',
     '     - your messages and the conversation history,',
-    '     - the system prompt (including a top-level listing of workspace files),',
+    '     - the system prompt (workspace root path only; no tree or file contents are attached automatically),',
     '     - tool definitions and, when tools run, tool results (web pages, search',
     '       results, shell command output, file contents the agent reads).',
     '   • That data is governed by the provider\'s own privacy policy, not by AXION.',

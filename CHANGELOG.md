@@ -1,20 +1,33 @@
 # Changelog
 
-This file records the release package prepared for the first public npmjs publication. The archive itself does not mean that npm publication has already succeeded.
+## 1.0.2 — 2026-11-09
 
-## 1.0.0 — Final npmjs Release (prepared for publication)
+### Added
+- Unlimited-by-default tool-call execution (`maxToolCallsPerRequest: 0`) with an optional per-request budget configurable through `/tool-limit`.
+- Repeated-call loop guard: an identical tool name + normalized arguments signature is executed at most twice per request; the third request is blocked and AXION is asked for a final response without tools.
+- Explicit workspace context tools: `get_workspace_tree` for directory structure and `read_files` for selected files or all text files within a configurable output-byte budget.
+- Multiline custom-instructions editor: Enter inserts a newline; Ctrl+X starts confirmation; Y saves; N/Esc cancels; Ctrl+A clears the editor. Non-TTY input uses `:save` / `:cancel`.
+- Runtime English / Bahasa Indonesia localization for command prompts, menu choices, and command feedback, with locale dictionary parity checks.
+- Custom-model provider association by registered provider ID, including custom providers.
+- Capability-aware hard-rule system prompt describing available tools, file-context request flow, terminal approval guardrails, and verification expectations.
 
-- Package identity prepared for publication: `@axion-neuralis/axion-ai-cli`.
-- CLI command: `axion-ai-cli`; `axion-cli` and `axn-cli` remain compatibility aliases.
-- Set the intended public package version and runtime version to `1.0.0`.
-- Set package author metadata to `axion` and configure scoped package publication as public.
-- Added npmjs registry metadata and package installation instructions.
-- Updated the automatic version checker to read the latest package metadata from `https://registry.npmjs.org/@axion%2Faxion-ai-cli/latest`.
-- Replaced the GitHub shell-script updater with `npm install --global @axion-neuralis/axion-ai-cli@latest`.
-- Reworked `install.sh` as an npmjs bootstrapper; it no longer downloads source archives or runs a source-build installer.
-- Synchronized `package.json`, `package-lock.json`, `version.json`, `version-info.json`, `update-info.json`, TypeScript source, generated `dist/`, tests, and documentation.
-- Includes interactive chat, Google AI Studio and OpenAI-compatible providers, tool calling, web search and page extraction, conversation history, summarized long-term memory, configurable permissions, and persistent custom providers.
+### Fixed and improved
+- Removed the hard-coded tool-iteration cutoff that could stop an otherwise valid multi-step workflow.
+- Removed automatic workspace tree injection from the system prompt; workspace file contents are only sent after explicit tool requests.
+- Resolved final-path symlinks before access-scope checks and blocked unresolved symlink targets to prevent workspace-scope escapes.
+- Kept creation of new files in nested directories working when intermediate directories do not yet exist.
+- Prevented custom models from silently changing provider context; unregistered provider associations are rejected during config normalization.
+- Updated the privacy summary to reflect the explicit file-context model.
+- Corrected the npm latest-version metadata URL to use the actual `@axion-neuralis` package scope.
+- Redacted sensitive shell-command output before placing it into model conversation history.
+- Updated `/language` to refresh the REPL prompt immediately after switching locales.
 
-## Previous development history
+### Documentation and release
+- Updated README, audit notes, version manifests, user notes, and package metadata to version `1.0.2`.
+- Added `TASK_LIST.md` and `TASK_CHECKLIST.md` to track the requested work and its local verification status.
 
-The feature set was developed and tested iteratively before the first public npm release. The intended public npm version sequence starts at `1.0.0`; pre-publication iteration numbers are intentionally not represented as published package versions.
+## 1.0.0 — Final npmjs Release
+
+- Initial public package release metadata and npmjs installation/update flow.
+- Interactive terminal AI agent with Google AI Studio and OpenAI-compatible providers.
+- Tool calling, web search and page extraction, local conversations, summarized long-term memory, permissions, custom providers, and update checks.

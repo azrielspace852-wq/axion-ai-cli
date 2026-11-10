@@ -8,7 +8,7 @@ import { Agent } from '../agent/Agent';
 import { CommandRouter, COMMAND_LIST } from '../commands/CommandRouter';
 import { CommandContext, ReplLike } from '../commands/CommandContext';
 import { printBanner } from '../banner';
-import { t, setLanguage } from '../i18n';
+import { t, setLanguage, localizeUiText } from '../i18n';
 import { log } from '../utils/logger';
 import * as H from '../commands/handlers';
 
@@ -49,7 +49,7 @@ export class REPL implements ReplLike {
     private agent: Agent,
   ) {
     setLanguage(cfgMgr.get().language);
-    this.agent.setNotice((message) => this.notice(message));
+    this.agent.setNotice((message) => this.notice(localizeUiText(message)));
     this.agent.setStatus((phase, detail) => this.updateStatus(phase, detail));
   }
 
@@ -94,12 +94,32 @@ export class REPL implements ReplLike {
     this.newConversation();
     this.print(chalk.dim(t('greeting')) + '\n');
     if (this.cfgMgr.needsOnboarding()) {
-      this.print(chalk.cyan('First launch — quick command reference:'));
+      this.print(chalk.cyan(localizeUiText('First launch — quick command reference:')));
       await H.handleHelp(this.commandContext());
       this.cfgMgr.get().hasCompletedOnboarding = true;
       this.cfgMgr.save();
     }
     this.rl.prompt();
+  }
+
+  private localizedCommandRepl(): ReplLike {
+    return {
+      print: (message) => this.print(localizeUiText(message)),
+      question: (prompt) => this.question(localizeUiText(prompt)),
+      questionSecret: (prompt) => this.questionSecret(localizeUiText(prompt)),
+      editMultiline: (prompt, initial) => this.editMultiline(localizeUiText(prompt), initial),
+      select: (prompt, options, activeIndex) => this.select(localizeUiText(prompt), options.map(localizeUiText), activeIndex),
+      confirm: (question) => this.confirm(localizeUiText(question)),
+      clearScreen: () => this.clearScreen(),
+      exit: (code) => this.exit(code),
+      resetContext: () => this.resetContext(),
+      openConversation: (id) => this.openConversation(id),
+      newConversation: () => this.newConversation(),
+      currentConversationId: () => this.currentConversationId(),
+      currentConversationName: () => this.currentConversationName(),
+      renameCurrentConversation: (name) => this.renameCurrentConversation(name),
+      flushConversation: () => this.flushConversation(),
+    };
   }
 
   private commandContext(): CommandContext {
@@ -108,7 +128,7 @@ export class REPL implements ReplLike {
       config: this.cfgMgr.get(),
       configManager: this.cfgMgr,
       saveConfig: () => this.cfgMgr.save(),
-      repl: this,
+      repl: this.localizedCommandRepl(),
       conversations: this.conversations,
       memories: this.memories,
       agent: this.agent,
@@ -130,10 +150,14 @@ export class REPL implements ReplLike {
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       log.error(message);
-      this.print(chalk.red('Error: ') + message);
+      this.print(chalk.red(localizeUiText('Error: ')) + message);
     } finally {
       this.handling = false;
-      if (this.running) this.rl.prompt();
+      if (this.running) {
+        this.basePrompt = chalk.cyan(t('prompt'));
+        this.rl.setPrompt(this.basePrompt);
+        this.rl.prompt();
+      }
     }
   }
 
@@ -152,7 +176,7 @@ export class REPL implements ReplLike {
     // ESC-cancel: while the agent is working, pressing Escape requests cancellation.
     const onEsc = (_str: string, key?: { name?: string }) => {
       if (key?.name === 'escape') {
-        this.print(chalk.yellow('\n(cancel requested — stopping safely…)'));
+        this.print(chalk.yellow(`\n(${localizeUiText('cancel requested — stopping safely…')})`));
         this.agent.cancel();
       }
     };
@@ -169,7 +193,7 @@ export class REPL implements ReplLike {
     } catch (error: unknown) {
       this.stopStatus();
       const message = error instanceof Error ? error.message : String(error);
-      this.print(chalk.red('Error: ') + message);
+      this.print(chalk.red(localizeUiText('Error: ')) + message);
     } finally {
       process.stdin.removeListener('keypress', onEsc);
       this.stopStatus();
@@ -326,6 +350,101 @@ export class REPL implements ReplLike {
     });
   }
 
+  editMultiline(prompt: string, initialValue: string): Promise<string | null> {
+    if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function' || !process.stdout.isTTY) {
+      // Script/piped-input fallback: Enter still adds a line; :save commits and :cancel aborts.
+      this.print(prompt);
+      this.print(chalk.dim(localizeUiText('Enter adds a newline. Type :save on its own line to confirm, or :cancel to discard.')));
+      const lines = initialValue ? initialValue.split('\n') : [];
+      const collect = async (): Promise<string | null> => {
+        const line = await this.question('  ');
+        if (line.trim() === ':save') return lines.join('\n');
+        if (line.trim() === ':cancel') return null;
+        lines.push(line);
+        return collect();
+      };
+      return collect();
+    }
+
+    return new Promise((resolve) => {
+      const input = process.stdin;
+      const previousRawMode = input.isRaw;
+      const previousListeners = (input.listeners('keypress') as Array<(str: string, key: unknown) => void>).slice();
+      let value = initialValue;
+      let confirming = false;
+      let finished = false;
+      const footer = localizeUiText('CTRL+X: save · Y/N: confirm · ESC: cancel · CTRL+A: clear all');
+
+      this.rl.removeListener('line', this.onLineBound);
+      for (const listener of previousListeners) input.removeListener('keypress', listener);
+      readline.emitKeypressEvents(input);
+      input.setRawMode(true);
+      input.resume();
+      process.stdout.write(`${prompt}\n`);
+      process.stdout.write('\x1b[s'); // anchor for the editor area; redraws stay below the prompt
+
+      const render = (status = footer): void => {
+        process.stdout.write('\x1b[u\x1b[J');
+        process.stdout.write(value);
+        process.stdout.write(`\n${chalk.dim(status)}`);
+      };
+
+      const finish = (result: string | null): void => {
+        if (finished) return;
+        finished = true;
+        input.removeListener('keypress', onKeypress);
+        try { input.setRawMode(Boolean(previousRawMode)); } catch { /* stdin may have closed */ }
+        for (const listener of previousListeners) input.on('keypress', listener);
+        this.rl.addListener('line', this.onLineBound);
+        process.stdout.write('\x1b[u\x1b[J');
+        if (result !== null) process.stdout.write(result);
+        process.stdout.write('\n\n');
+        this.clearInputBuffer();
+        resolve(result);
+      };
+
+      const onKeypress = (str: string, key: { name?: string; ctrl?: boolean }): void => {
+        if (confirming) {
+          if (key.name === 'escape' || (key.ctrl && key.name === 'c')) return finish(null);
+          const choice = (key.name || str || '').toLowerCase();
+          if (choice === 'y') return finish(value);
+          if (choice === 'n') return finish(null);
+          return;
+        }
+        if (key.name === 'escape' || (key.ctrl && key.name === 'c')) return finish(null);
+        if (key.ctrl && key.name === 'x') {
+          confirming = true;
+          render(localizeUiText('Save changes? Press Y to save · N or ESC to cancel.'));
+          return;
+        }
+        if (key.ctrl && key.name === 'a') {
+          value = '';
+          render();
+          return;
+        }
+        if (key.name === 'backspace' || key.name === 'delete' || str === '\x7f') {
+          const chars = Array.from(value);
+          chars.pop();
+          value = chars.join('');
+          render();
+          return;
+        }
+        if (key.name === 'return' || key.name === 'enter' || str === '\r' || str === '\n') {
+          value += '\n';
+          render();
+          return;
+        }
+        if (str && !key.ctrl && !key.name?.startsWith('f') && str >= ' ') {
+          value += str;
+          render();
+        }
+      };
+
+      input.on('keypress', onKeypress);
+      render();
+    });
+  }
+
   private clearInputBuffer(): void {
     // Discard anything typed while a menu/secret prompt was active.
     (this.rl as unknown as { line: string }).line = '';
@@ -346,7 +465,7 @@ export class REPL implements ReplLike {
         const suffix = index === activeIndex ? activeMarker : '';
         this.print(` ${index + 1}. ${option}${suffix}`);
       });
-      return this.question('Select number (Enter to cancel): ').then((value) => {
+      return this.question(localizeUiText('Select number (Enter to cancel): ')).then((value) => {
         if (!value.trim()) return null;
         const number = Number(value.trim());
         return Number.isInteger(number) && number >= 1 && number <= options.length ? number - 1 : null;
@@ -370,7 +489,7 @@ export class REPL implements ReplLike {
           const activeSuffix = isActive && index !== selected ? activeMarker : '';
           process.stdout.write(`\r\x1b[2K${marker}${label}\x1b[0m${activeSuffix}\n`);
         });
-        process.stdout.write(`\r\x1b[2K${chalk.dim('Use ↑/↓ and Enter; Esc cancels. ● = current')}\n`);
+        process.stdout.write(`\r\x1b[2K${chalk.dim(t('select.hint'))}\n`);
       };
 
       const finish = (value: number | null): void => {

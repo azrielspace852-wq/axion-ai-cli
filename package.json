@@ -1,7 +1,7 @@
 {
   "name": "@axion-neuralis/axion-ai-cli",
-  "version": "1.0.0",
-  "description": "AXION AI CLI — an interactive terminal AI agent with tools, provider integrations, conversation history, and local memory",
+  "version": "1.0.2",
+  "description": "AXION AI CLI \u2014 an interactive terminal AI agent with tools, provider integrations, conversation history, and local memory",
   "license": "GPL-3.0-or-later",
   "author": "axion",
   "bin": {

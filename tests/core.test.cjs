@@ -21,7 +21,7 @@ test('configuration defaults are safe and persisted atomically with private file
   assert.equal(manager.get().permissions.shellExec, true);
   assert.equal(manager.get().language, 'en');
   assert.equal(manager.get().accessScope, 'workspace');
-  assert.equal(manager.get().maxToolCallsPerRequest, 30);
+  assert.equal(manager.get().maxToolCallsPerRequest, 0, 'fresh configuration defaults to unlimited tool calls');
   assert.equal(manager.needsOnboarding(), true);
 
   manager.get().language = 'id';
@@ -287,7 +287,7 @@ test('npm package metadata, lockfile, and public release version are synchronize
   const version = JSON.parse(fs.readFileSync(path.join(projectRoot, 'version.json'), 'utf8'));
   assert.equal(pkg.name, '@axion-neuralis/axion-ai-cli');
   assert.equal(pkg.author, 'axion');
-  assert.equal(pkg.version, '1.0.0');
+  assert.equal(pkg.version, '1.0.2');
   assert.equal(lock.name, pkg.name);
   assert.equal(lock.version, pkg.version);
   assert.equal(lock.packages[''].name, pkg.name);
@@ -304,7 +304,7 @@ test('CLI version command starts without entering the interactive REPL', () => {
     env: { ...process.env },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^1\.0\.0\s*$/);
+  assert.match(result.stdout, /^1\.0\.2\s*$/);
 });
 
 test('npmjs installer delegates installation to the official npm registry', () => {
@@ -341,7 +341,7 @@ test.after(() => {
 });
 
 
-test('configuration migrates legacy instructions and clamps the per-request tool limit', () => {
+test('configuration migrates legacy instructions and preserves an explicit per-request tool budget', () => {
   const configPath = path.join(process.env.AXION_DATA_DIR, 'config.json');
   fs.writeFileSync(configPath, JSON.stringify({
     version: 1,
@@ -353,7 +353,7 @@ test('configuration migrates legacy instructions and clamps the per-request tool
   assert.equal(manager.get().customInstructions, 'legacy prompt', 'legacy instructions migrate to customInstructions');
   assert.equal(manager.get().systemPrompt, '', 'legacy systemPrompt field is normalized empty');
   assert.equal(manager.get().permissions.shellExec, false, 'explicit prior opt-out is preserved');
-  assert.equal(manager.get().maxToolCallsPerRequest, 100);
+  assert.equal(manager.get().maxToolCallsPerRequest, 999, 'positive limits are not truncated to an arbitrary fixed maximum');
   assert.equal(manager.needsOnboarding(), false);
 });
 
@@ -376,12 +376,16 @@ test('agent system prompt describes workspace, anti-hallucination, planning, and
   cfg.customInstructions = 'Use concise Indonesian.';
   const agent = new Agent(() => cfg, () => {});
   const prompt = agent.buildSystemPrompt('Known preference: concise');
-  assert.match(prompt, /Workspace root:/);
+  assert.match(prompt, /WORKSPACE ROOT:/);
+  assert.match(prompt, /get_workspace_tree/);
+  assert.match(prompt, /read_files/);
+  assert.match(prompt, /No project file contents or directory listing are automatically attached/);
   assert.match(prompt, /ANTI-HALLUCINATION/);
   assert.match(prompt, /TASK PLANNING/);
   assert.match(prompt, /WORKSPACE ONLY/);
   assert.match(prompt, /Use concise Indonesian/);
-  assert.match(prompt, /core rules take precedence/, 'base prompt locks core rules over custom instructions');
+  assert.match(prompt, /UNLIMITED by default/);
+  assert.match(prompt, /These rules are locked and take precedence/, 'base prompt locks core rules over custom instructions');
   assert.match(prompt, /Known preference: concise/);
 });
 
@@ -430,7 +434,7 @@ test('agent enforces maxToolCallsPerRequest while allowing a final model respons
     assert.equal(notices[1], '$ echo two');
     const toolMessages = history.filter((message) => message.role === 'tool');
     assert.equal(toolMessages.length, 3);
-    assert.match(toolMessages[2].content, /tool call limit \(2\) reached/);
+    assert.match(toolMessages[2].content, /tool-call budget \(2\) reached/);
   } finally {
     axios.post = originalPost;
   }
@@ -455,6 +459,7 @@ test('custom models can be edited while built-in model definitions stay immutabl
   const H = require('../dist/commands/handlers');
   const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
   const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.google.apiKey = 'test-google-key';
   cfg.customModels = [{ id: 'legacy-model-id', label: 'Legacy model', provider: 'google-ai-studio' }];
   cfg.model = 'legacy-model-id';
   const selections = [2, 0, 0]; // edit custom model -> first custom model -> Google AI Studio
@@ -480,7 +485,7 @@ test('access scope and tool limit commands persist selected settings', async () 
   const { CommandRouter } = require('../dist/commands/CommandRouter');
   const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
   const cfg = structuredClone(DEFAULT_CONFIG);
-  const selections = [1, 3]; // global scope, then 30 calls
+  const selections = [1, 4]; // global scope, then 30 calls
   const output = [];
   const ctx = {
     args: '', config: cfg, saveConfig() {},
@@ -539,6 +544,23 @@ test('terminal --help lists both terminal and in-chat commands', () => {
   assert.match(result.stdout, /update --info/);
 });
 
+test('terminal --help follows the saved Indonesian locale', () => {
+  const localeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axion-help-id-'));
+  fs.writeFileSync(path.join(localeDir, 'config.json'), JSON.stringify({ language: 'id' }));
+  try {
+    const result = spawnSync(process.execPath, [path.join(__dirname, '../dist/index.js'), '--help'], {
+      encoding: 'utf8', env: { ...process.env, AXION_DATA_DIR: localeDir },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Perintah terminal/);
+    assert.match(result.stdout, /Perintah chat/);
+    assert.match(result.stdout, /budget tool-call opsional per request/);
+    assert.doesNotMatch(result.stdout, /default 30/);
+  } finally {
+    fs.rmSync(localeDir, { recursive: true, force: true });
+  }
+});
+
 test('terminal update --info shows installed vs latest without updating', () => {
   const result = spawnSync(process.execPath, [path.join(__dirname, '../dist/index.js'), 'update', '--info'], {
     encoding: 'utf8', env: { ...process.env }, timeout: 20000,
@@ -546,6 +568,21 @@ test('terminal update --info shows installed vs latest without updating', () => 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Installed version:/);
   assert.match(result.stdout, /Latest available:/);
+});
+
+test('terminal update information follows the saved Indonesian locale', () => {
+  const localeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axion-update-id-'));
+  fs.writeFileSync(path.join(localeDir, 'config.json'), JSON.stringify({ language: 'id' }));
+  try {
+    const result = spawnSync(process.execPath, [path.join(__dirname, '../dist/index.js'), 'update', '--info'], {
+      encoding: 'utf8', env: { ...process.env, AXION_DATA_DIR: localeDir }, timeout: 20000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Informasi Pembaruan/);
+    assert.match(result.stdout, /Versi terpasang/);
+  } finally {
+    fs.rmSync(localeDir, { recursive: true, force: true });
+  }
 });
 
 test('terminal update dry-run prints the npmjs install command', () => {
@@ -612,6 +649,8 @@ test('ESC cancel sets the cancellation flag (checked between tool-call iteration
 test('UI step classification maps tool calls to human-readable steps', () => {
   const { classifyStep } = require('../dist/agent/Agent');
   assert.equal(classifyStep('read_file', { path: 'a.ts' }), 'Reading');
+  assert.equal(classifyStep('read_files', { paths: ['a.ts'] }), 'Reading');
+  assert.equal(classifyStep('get_workspace_tree', {}), 'Reading');
   assert.equal(classifyStep('list_dir', { path: '.' }), 'Reading');
   assert.equal(classifyStep('write_file', { path: 'a.ts' }), 'Editing file');
   assert.equal(classifyStep('delete_file', { path: 'a.ts' }), 'Deleting file');
@@ -643,4 +682,309 @@ test('filesystem write_file is atomic and gated by fileWrite permission', async 
   });
   assert.match(read.output, /hello-atomic/);
   fs.unlinkSync(target);
+});
+
+
+test('workspace context tools explicitly return tree and requested file content without following symlinks', async () => {
+  const { WorkspaceTreeTool, ReadFilesTool, ReadFileTool } = require('../dist/agent/tools/FileSystemTools');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'axion-context-workspace-'));
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'axion-context-external-'));
+  fs.mkdirSync(path.join(root, 'nested'));
+  fs.mkdirSync(path.join(root, 'node_modules', 'ignored'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'a.txt'), 'alpha-content');
+  fs.writeFileSync(path.join(root, 'nested', 'b.txt'), 'beta-content');
+  fs.writeFileSync(path.join(root, 'large.txt'), 'x'.repeat(128 * 1024));
+  if (process.platform !== 'win32') {
+    fs.symlinkSync(path.join(root, 'a.txt'), path.join(root, 'inside-link.txt'));
+    fs.symlinkSync(path.join(root, 'nested'), path.join(root, 'inside-dir-link'));
+  }
+  fs.writeFileSync(path.join(root, 'blob.bin'), Buffer.from([0, 1, 2, 3]));
+  fs.writeFileSync(path.join(root, 'node_modules', 'ignored', 'secret.txt'), 'ignored-content');
+  fs.writeFileSync(path.join(external, 'outside.txt'), 'outside-secret');
+  if (process.platform !== 'win32') fs.symlinkSync(path.join(external, 'outside.txt'), path.join(root, 'outside-link.txt'));
+  const ctx = {
+    cwd: root,
+    accessScope: 'workspace',
+    permissions: { fileRead: true, fileWrite: false, shellExec: false, webAccess: false, searchAccess: false },
+  };
+  try {
+    const tree = await WorkspaceTreeTool.execute({}, ctx);
+    assert.equal(tree.success, true);
+    if (process.platform !== 'win32') {
+      const symlinkTree = await WorkspaceTreeTool.execute({ path: 'inside-dir-link' }, ctx);
+      assert.equal(symlinkTree.success, false);
+      assert.match(symlinkTree.output, /Symbolic-link paths are not traversed/);
+    }
+    assert.match(tree.output, /a\.txt/);
+    assert.match(tree.output, /nested\//);
+    assert.doesNotMatch(tree.output, /alpha-content|beta-content/);
+    assert.doesNotMatch(tree.output, /node_modules\/ignored|ignored\//);
+
+    const selected = await ReadFilesTool.execute({ paths: ['a.txt', 'nested/b.txt'] }, ctx);
+    assert.equal(selected.success, true);
+    assert.match(selected.output, /alpha-content/);
+    assert.match(selected.output, /beta-content/);
+
+    const largeSingle = await ReadFileTool.execute({ path: 'large.txt' }, ctx);
+    assert.equal(largeSingle.success, true);
+    assert.match(largeSingle.output, /TRUNCATED/);
+    assert.ok(largeSingle.output.length < 17000, 'single-file text output is bounded');
+
+    if (process.platform !== 'win32') {
+      const insideSymlink = await ReadFilesTool.execute({ paths: ['inside-link.txt'] }, ctx);
+      assert.equal(insideSymlink.success, true);
+      assert.match(insideSymlink.output, /symbolic links are not read/);
+      assert.doesNotMatch(insideSymlink.output, /alpha-content/);
+    }
+
+    const all = await ReadFilesTool.execute({ all: true }, ctx);
+    assert.equal(all.success, true);
+    assert.match(all.output, /alpha-content/);
+    assert.match(all.output, /beta-content/);
+    assert.doesNotMatch(all.output, /ignored-content|outside-secret/);
+    assert.match(all.output, /skipped 1 binary file/);
+
+    const limitedScan = await ReadFilesTool.execute({ all: true, maxFiles: 1 }, ctx);
+    assert.equal(limitedScan.success, true);
+    assert.match(limitedScan.output, /discovery was capped at 1 files/);
+    assert.match(limitedScan.output, /Discovered 1 file\(s\)/);
+
+    const budgetClamped = await ReadFilesTool.execute({ paths: ['a.txt'], maxTotalBytes: Number.MAX_SAFE_INTEGER }, ctx);
+    assert.equal(budgetClamped.success, true);
+    assert.match(budgetClamped.output, /capped at 10485760 bytes/);
+    assert.match(budgetClamped.output, /Total output budget: 10485760 bytes/);
+
+    if (process.platform !== 'win32') {
+      const symlinkRead = await ReadFilesTool.execute({ paths: ['outside-link.txt'] }, ctx);
+      assert.equal(symlinkRead.success, true, 'batch tool reports per-file failures while keeping the request transparent');
+      assert.match(symlinkRead.output, /symbolic links are not read by read_files/);
+      assert.doesNotMatch(symlinkRead.output, /outside-secret/);
+    }
+
+    const denied = await ReadFilesTool.execute({ paths: ['a.txt'] }, { ...ctx, permissions: { ...ctx.permissions, fileRead: false } });
+    assert.equal(denied.success, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(external, { recursive: true, force: true });
+  }
+});
+
+test('workspace-scoped single-file reads reject symlink targets outside the workspace', async () => {
+  if (process.platform === 'win32') return;
+  const { ReadFileTool } = require('../dist/agent/tools/FileSystemTools');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'axion-symlink-root-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'axion-symlink-out-'));
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'must-not-leak');
+  fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'secret-link.txt'));
+  try {
+    const result = await ReadFileTool.execute({ path: 'secret-link.txt' }, {
+      cwd: root, accessScope: 'workspace',
+      permissions: { webAccess: false, searchAccess: false, shellExec: false, fileRead: true, fileWrite: false },
+    });
+    assert.equal(result.success, false);
+    assert.match(result.output, /outside the workspace/);
+    assert.doesNotMatch(result.output, /must-not-leak/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('agent supports more than thirty tool calls when no optional per-request budget is configured', async () => {
+  const axios = require('axios');
+  const originalPost = axios.post;
+  const { Agent } = require('../dist/agent/Agent');
+  const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.google.apiKey = 'test-key';
+  cfg.maxToolCallsPerRequest = 0;
+  const callCount = 40;
+  let requestIndex = 0;
+  const notices = [];
+  axios.post = async () => {
+    const index = requestIndex++;
+    const part = index < callCount
+      ? { functionCall: { name: 'list_dir', args: { path: `missing-directory-${index}` } } }
+      : { text: `completed ${callCount} tool calls` };
+    return { status: 200, data: { candidates: [{ content: { parts: [part] }, finishReason: 'STOP' }] } };
+  };
+  try {
+    const agent = new Agent(() => cfg, (message) => notices.push(message));
+    const history = [{ role: 'user', content: 'Perform many different directory checks' }];
+    const answer = await agent.chat(history, agent.buildSystemPrompt(''));
+    assert.equal(answer, `completed ${callCount} tool calls`);
+    assert.equal(notices.length, callCount);
+    assert.equal(history.filter((message) => message.role === 'tool').length, callCount);
+    assert.equal(requestIndex, callCount + 1);
+  } finally {
+    axios.post = originalPost;
+  }
+});
+
+test('agent loop guard blocks the third identical tool call and requests a final response', async () => {
+  const axios = require('axios');
+  const originalPost = axios.post;
+  const { Agent } = require('../dist/agent/Agent');
+  const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.google.apiKey = 'test-key';
+  cfg.maxToolCallsPerRequest = 0;
+  let requestIndex = 0;
+  const notices = [];
+  axios.post = async () => {
+    const index = requestIndex++;
+    const part = index < 3
+      ? { functionCall: { name: 'list_dir', args: { path: '.' } } }
+      : { text: 'Loop stopped safely.' };
+    return { status: 200, data: { candidates: [{ content: { parts: [part] }, finishReason: 'STOP' }] } };
+  };
+  try {
+    const agent = new Agent(() => cfg, (message) => notices.push(message));
+    const history = [{ role: 'user', content: 'Explore the current directory' }];
+    const answer = await agent.chat(history, agent.buildSystemPrompt(''));
+    assert.equal(answer, 'Loop stopped safely.');
+    assert.equal(notices.length, 3, 'two executed-call notices plus one loop-stop notice are emitted');
+    const toolMessages = history.filter((message) => message.role === 'tool');
+    assert.equal(toolMessages.length, 3);
+    assert.match(toolMessages[2].content, /Loop guard blocked repeated tool call/);
+    assert.equal(requestIndex, 4, 'one final provider turn runs without tool definitions');
+  } finally {
+    axios.post = originalPost;
+  }
+});
+
+test('custom instructions handler stores multiline content and cancels without saving', async () => {
+  const { handleInstructions } = require('../dist/commands/handlers');
+  const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  const output = [];
+  let saved = 0;
+  const ctx = {
+    config: cfg,
+    saveConfig: () => { saved += 1; },
+    repl: {
+      print: (message) => output.push(message),
+      editMultiline: async () => 'first line\nsecond line',
+    },
+  };
+  await handleInstructions(ctx);
+  assert.equal(cfg.customInstructions, 'first line\nsecond line');
+  assert.equal(saved, 1);
+  ctx.repl.editMultiline = async () => null;
+  await handleInstructions(ctx);
+  assert.equal(cfg.customInstructions, 'first line\nsecond line');
+  assert.equal(saved, 1, 'ESC/N cancellation must not persist or mutate the config');
+});
+
+test('custom models are bound to the active registered provider when added', async () => {
+  const { handleModels } = require('../dist/commands/handlers');
+  const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.activeProvider = 'my-provider';
+  cfg.customProviders = [{ id: 'my-provider', name: 'My Provider', baseUrl: 'https://provider.example/v1', apiKey: 'secret' }];
+  const selections = [1, 0]; // add model -> use active registered provider
+  const answers = ['my-model-id', 'My Model'];
+  const ctx = {
+    config: cfg,
+    saveConfig() {},
+    repl: {
+      select: async () => selections.shift(),
+      question: async () => answers.shift(),
+      print() {},
+    },
+  };
+  await handleModels(ctx);
+  assert.equal(cfg.activeProvider, 'my-provider');
+  assert.equal(cfg.model, 'my-model-id');
+  assert.deepEqual(cfg.customModels[0], {
+    id: 'my-model-id', label: 'My Model', provider: 'openai-compatible', providerId: 'my-provider',
+  });
+});
+
+test('editing a custom model rejects invalid display names without saving', async () => {
+  const { handleModels } = require('../dist/commands/handlers');
+  const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.customModels = [{ id: 'editable-model', label: 'Editable Model', provider: 'google-ai-studio' }];
+  const selections = [2, 0];
+  const answers = ['x'.repeat(101)];
+  const output = [];
+  let saved = 0;
+  await handleModels({
+    config: cfg,
+    saveConfig() { saved += 1; },
+    repl: { select: async () => selections.shift(), question: async () => answers.shift(), print: (line) => output.push(line) },
+  });
+  assert.equal(saved, 0);
+  assert.equal(cfg.customModels[0].label, 'Editable Model');
+  assert.match(output.join(' '), /Invalid model display name/);
+});
+
+test('custom model config drops models associated with unregistered providers', () => {
+  const configPath = path.join(process.env.AXION_DATA_DIR, 'config.json');
+  fs.writeFileSync(configPath, JSON.stringify({
+    activeProvider: 'google-ai-studio',
+    customProviders: [{ id: 'bad-endpoint', name: 'Bad Endpoint', baseUrl: 'ftp://provider.example/v1', apiKey: 'key' }],
+    customModels: [
+      { id: 'ghost-model', label: 'Ghost', provider: 'openai-compatible', providerId: 'not-registered' },
+      { id: 'mismatched-model', label: 'Mismatched', provider: 'openai-compatible', providerId: 'google-ai-studio' },
+      { id: 'bad-endpoint-model', label: 'Bad endpoint', provider: 'openai-compatible', providerId: 'bad-endpoint' },
+    ],
+  }));
+  const cfg = new ConfigManager().get();
+  assert.deepEqual(cfg.customModels, [], 'unknown, invalid-endpoint, and transport-mismatched provider associations are dropped');
+  assert.deepEqual(cfg.customProviders, [], 'invalid custom-provider endpoints are not registered from persisted config');
+});
+
+
+test('selecting a custom model keeps the exact registered custom provider active', async () => {
+  const { handleModels } = require('../dist/commands/handlers');
+  const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.activeProvider = 'my-provider';
+  cfg.customProviders = [{ id: 'my-provider', name: 'My Provider', baseUrl: 'https://provider.example/v1', apiKey: 'secret' }];
+  cfg.customModels = [{ id: 'my-model', label: 'My Model', provider: 'openai-compatible', providerId: 'my-provider' }];
+  const selections = [0, 0]; // model management -> select model
+  const ctx = {
+    config: cfg,
+    saveConfig() {},
+    repl: { select: async () => selections.shift(), print() {} },
+  };
+  await handleModels(ctx);
+  assert.equal(cfg.activeProvider, 'my-provider');
+  assert.equal(cfg.model, 'my-model');
+});
+
+test('adding a custom model refuses a registered provider without valid credentials', async () => {
+  const { handleModels } = require('../dist/commands/handlers');
+  const { DEFAULT_CONFIG } = require('../dist/config/ConfigManager');
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.google.apiKey = '';
+  const selections = [1, 0];
+  const answers = ['unconfigured-model', 'Unconfigured Model'];
+  const output = [];
+  let saved = 0;
+  const ctx = {
+    config: cfg,
+    saveConfig() { saved += 1; },
+    repl: { select: async () => selections.shift(), question: async () => answers.shift(), print: (line) => output.push(line) },
+  };
+  await handleModels(ctx);
+  assert.equal(saved, 0);
+  assert.equal(cfg.customModels.length, 0);
+  assert.match(output.join(' '), /not configured with a valid endpoint and API key/);
+});
+
+test('existing English and Indonesian i18n dictionaries have identical key coverage and UI phrases switch at runtime', () => {
+  const i18n = require('../dist/i18n');
+  assert.equal(i18n.hasCompleteTranslationCoverage(), true);
+  i18n.setLanguage('en');
+  assert.match(i18n.t('help.toolLimit'), /0 means unlimited/);
+  i18n.setLanguage('id');
+  assert.match(i18n.t('help.toolLimit'), /0 berarti tanpa batas/);
+  assert.equal(i18n.localizeUiText('Custom instructions saved.'), 'Instruksi khusus berhasil disimpan.');
+  assert.match(i18n.localizeUiText('Provider My Provider is not configured with a valid endpoint and API key. No changes were saved.'), /belum dikonfigurasi dengan endpoint dan API key yang valid/);
+  assert.equal(i18n.localizeUiText('CTRL+X: save · Y/N: confirm · ESC: cancel · CTRL+A: clear all'), 'CTRL+X: simpan · Y/N: konfirmasi · ESC: batal · CTRL+A: hapus semua');
+  i18n.setLanguage('en');
+  assert.equal(i18n.localizeUiText('Custom instructions saved.'), 'Custom instructions saved.');
 });

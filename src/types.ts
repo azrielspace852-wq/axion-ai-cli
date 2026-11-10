@@ -87,6 +87,7 @@ export interface CustomModel {
   id: string;      // model basename/model ID sent to the provider
   label: string;   // user-facing model name
   provider: ProviderType;
+  providerId?: string; // exact registered provider id; required to associate a model with a custom provider
   baseUrl?: string; // optional per-model OpenAI-compatible endpoint
 }
 
@@ -106,7 +107,7 @@ export interface AxionConfig {
   dangerousActionPolicy: DangerousActionPolicy;
   verbose: boolean;              // when false, tool/file changes are summarized (not raw content)
   accessScope: AccessScope;
-  maxToolCallsPerRequest: number;
+  maxToolCallsPerRequest: number; // 0 = unlimited; positive values are optional per-request execution budgets
   maxInputTokens?: number;   // optional soft cap on input context (estimated as chars/4; oldest non-system messages trimmed first)
   maxOutputTokens?: number;  // optional cap forwarded to the provider as maxOutputTokens / max_tokens
   hasCompletedOnboarding: boolean;
@@ -172,7 +173,7 @@ export const THINKING_BUDGET: Record<Exclude<ThinkingLevel, 'off'>, number> = {
 };
 
 export const USER_AGENT =
-  'Mozilla/5.0 (compatible; AxionAICLI/1.0.0; +https://github.com/azrielspace852-wq/axion-ai-agents-cli)';
+  'Mozilla/5.0 (compatible; AxionAICLI/1.0.2; +https://github.com/azrielspace852-wq/axion-ai-agents-cli)';
 
 export const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';

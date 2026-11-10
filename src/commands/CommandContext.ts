@@ -7,6 +7,7 @@ export interface ReplLike {
   print(msg: string): void;
   question(q: string): Promise<string>;
   questionSecret(q: string): Promise<string>;
+  editMultiline(prompt: string, initialValue: string): Promise<string | null>;
   select(prompt: string, options: string[], activeIndex?: number): Promise<number | null>;
   confirm(question: string): Promise<boolean>; // Yes/No explicit confirmation for dangerous actions
   clearScreen(): void;

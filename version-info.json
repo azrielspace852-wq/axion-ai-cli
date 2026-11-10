@@ -1,6 +1,6 @@
 {
-  "latestVersion": "1.0.0",
-  "releaseNotes": "Final npmjs release package prepared at version 1.0.0. Includes interactive AI-agent CLI, Google AI Studio and OpenAI-compatible providers, tool calling, web search and page extraction, local conversation history and summarized long-term memory, configurable permissions, custom providers, and npm registry-based update checks.",
+  "latestVersion": "1.0.2",
+  "releaseNotes": "AXION AI Agents CLI 1.0.2 adds unlimited-by-default tool execution with a repeated-call loop guard and optional per-request budgets; explicit workspace-tree and multi-file context tools; multiline custom instructions with Ctrl+X confirmation; complete English/Indonesian command UI localization; provider-bound custom models; stricter capability-aware system rules; security fixes and expanded local regression coverage.",
   "packageName": "@axion-neuralis/axion-ai-cli",
   "registryUrl": "https://registry.npmjs.org/",
   "installCommand": "npm install -g @axion-neuralis/axion-ai-cli"
